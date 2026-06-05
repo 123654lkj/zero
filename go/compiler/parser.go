@@ -82,6 +82,10 @@ func (p *Parser) parseStatement() Stmt {
 		if p.peek.Type == TOKEN_ASSIGN {
 			return p.parseAssign()
 		}
+		// Check if this is index assignment: IDENT[expr] = expr
+		if p.peek.Type == TOKEN_LBRACKET {
+			return p.parseIndexAssign()
+		}
 		return p.parseExprStmt()
 	default:
 		return p.parseExprStmt()
@@ -146,6 +150,27 @@ func (p *Parser) skipNewlines() {
 	}
 }
 
+// parseIndexAssign parses: ident[expr] = expr
+func (p *Parser) parseIndexAssign() Stmt {
+	nameTok := p.expect(TOKEN_IDENT)
+	p.expect(TOKEN_LBRACKET)
+	index := p.parseExpression()
+	p.expect(TOKEN_RBRACKET)
+	if p.current.Type == TOKEN_ASSIGN {
+		p.advance()
+		value := p.parseExpression()
+		return &IndexAssign{
+			Token:  nameTok,
+			Object: &Identifier{Token: nameTok, Name: nameTok.Literal},
+			Index:  index,
+			Value:  value,
+		}
+	}
+	// Not assignment, build IndexExpr and wrap in ExprStmt
+	// (this shouldn't normally happen since parseStatement checks for LBRACKET first)
+	return &ExprStmt{Expr: &IndexExpr{Token: nameTok, Object: &Identifier{Token: nameTok, Name: nameTok.Literal}, Index: index}}
+}
+
 // parseIf parses: if expr block (else block)?
 func (p *Parser) parseIf() *IfStmt {
 	tok := p.expect(TOKEN_IF)
@@ -154,7 +179,13 @@ func (p *Parser) parseIf() *IfStmt {
 	var elseBlock Block
 	p.skipNewlines()
 	if p.match(TOKEN_ELSE) {
-		elseBlock = p.parseBlock()
+		if p.current.Type == TOKEN_IF {
+			// else if: wrap inner if in a block
+			innerIf := p.parseIf()
+			elseBlock = Block{Token: innerIf.Token, Stmts: []Stmt{innerIf}}
+		} else {
+			elseBlock = p.parseBlock()
+		}
 	}
 	return &IfStmt{Token: tok, Cond: cond, Then: then, Else: elseBlock}
 }

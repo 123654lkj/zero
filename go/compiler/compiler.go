@@ -99,6 +99,8 @@ func lineOfStmt(s Stmt) int {
 		return n.Token.Line
 	case *Block:
 		return n.Token.Line
+	case *IndexAssign:
+		return n.Token.Line
 	}
 	return 1
 }
@@ -166,6 +168,12 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			c.emitWordWithOperand(byte(opcode.OP_STORE_GLOBAL), uint16(idx))
 			c.emitOp(opcode.OP_POP)
 		}
+
+	case *IndexAssign:
+		c.compileExpression(s.Object)
+		c.compileExpression(s.Index)
+		c.compileExpression(s.Value)
+		c.emitOp(opcode.OP_ARRAY_SET)
 
 	case *ReturnStmt:
 		if s.Value != nil {

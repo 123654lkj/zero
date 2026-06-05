@@ -53,6 +53,9 @@ func NewVM() *VM {
 	vm.registerBuiltin("print", builtinPrint)
 	vm.registerBuiltin("len", builtinLen)
 	vm.registerBuiltin("type", builtinType)
+	vm.registerBuiltin("char_at", builtinCharAt)
+	vm.registerBuiltin("read_file", builtinReadFile)
+	vm.registerBuiltin("write_file", builtinWriteFile)
 	return vm
 }
 
@@ -324,29 +327,41 @@ func (vm *VM) Run() {
 			vm.Push(value.ArrayValue(arr))
 
 		case opcode.OP_ARRAY_GET:
-			idx, arr := vm.Pop(), vm.Pop()
-			if !arr.IsArray() || !idx.IsInt() {
-				panic("array_get: need (array, int)")
+			idx, obj := vm.Pop(), vm.Pop()
+			if obj.IsArray() && idx.IsInt() {
+				a := obj.AsArray()
+				i := int(idx.AsInt())
+				if i < 0 || i >= len(a) {
+					panic(fmt.Sprintf("array index out of bounds: %d", i))
+				}
+				vm.Push(a[i])
+			} else if obj.IsMap() && idx.IsString() {
+				v, ok := obj.AsMap()[idx.AsString()]
+				if !ok {
+					vm.Push(value.NilValue())
+				} else {
+					vm.Push(v)
+				}
+			} else {
+				panic("index_get: need (array, int) or (map, string)")
 			}
-			a := arr.AsArray()
-			i := int(idx.AsInt())
-			if i < 0 || i >= len(a) {
-				panic(fmt.Sprintf("array index out of bounds: %d", i))
-			}
-			vm.Push(a[i])
 
 		case opcode.OP_ARRAY_SET:
-			val, idx, arr := vm.Pop(), vm.Pop(), vm.Pop()
-			if !arr.IsArray() || !idx.IsInt() {
-				panic("array_set: need (array, int, value)")
+			val, idx, obj := vm.Pop(), vm.Pop(), vm.Pop()
+			if obj.IsArray() && idx.IsInt() {
+				a := obj.AsArray()
+				i := int(idx.AsInt())
+				if i < 0 || i >= len(a) {
+					panic(fmt.Sprintf("array index out of bounds: %d", i))
+				}
+				a[i] = val
+				vm.Push(val)
+			} else if obj.IsMap() && idx.IsString() {
+				obj.AsMap()[idx.AsString()] = val
+				vm.Push(val)
+			} else {
+				panic("index_set: need (array, int, value) or (map, string, value)")
 			}
-			a := arr.AsArray()
-			i := int(idx.AsInt())
-			if i < 0 || i >= len(a) {
-				panic(fmt.Sprintf("array index out of bounds: %d", i))
-			}
-			a[i] = val
-			vm.Push(val)
 
 		case opcode.OP_MAP_NEW:
 			countVal := vm.Pop()

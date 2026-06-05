@@ -215,6 +215,15 @@ type Assign struct {
 	Value Expr
 }
 
+// IndexAssign represents index assignment: ident[expr] = expr
+type IndexAssign struct {
+	Token  Token
+	Object Expr
+	Index  Expr
+	Value  Expr
+}
+func (IndexAssign) stmtNode() {}
+
 type ReturnStmt struct {
 	Token Token
 	Value Expr // can be nil for bare return

@@ -1,0 +1,235 @@
+fn newLexer(source) {
+    let lex = {}
+    lex["source"] = source
+    lex["pos"] = 0
+    lex["line"] = 1
+    lex["col"] = 1
+    if len(source) > 0 {
+        lex["ch"] = char_at(source, 0)
+    } else {
+        lex["ch"] = ""
+    }
+    return lex
+}
+
+fn advanceChar(lex) {
+    let source = lex["source"]
+    let pos = lex["pos"]
+    if pos >= len(source) {
+        return ""
+    }
+    let ch = lex["ch"]
+    lex["pos"] = pos + 1
+    if ch == "\n" {
+        lex["line"] = lex["line"] + 1
+        lex["col"] = 1
+    } else {
+        lex["col"] = lex["col"] + 1
+    }
+    let newPos = lex["pos"]
+    if newPos < len(source) {
+        lex["ch"] = char_at(source, newPos)
+    } else {
+        lex["ch"] = ""
+    }
+    return ch
+}
+
+fn skipWhitespace(lex) {
+    let running = true
+    while lex["pos"] < len(lex["source"]) && running {
+        let ch = lex["ch"]
+        if ch == " " || ch == "\t" || ch == "\r" {
+            advanceChar(lex)
+        } else if ch == "/" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "/" {
+            while lex["pos"] < len(lex["source"]) && lex["ch"] != "\n" {
+                advanceChar(lex)
+            }
+        } else {
+            running = false
+        }
+    }
+}
+
+fn readNumber(lex) {
+    let startLine = lex["line"]
+    let startCol = lex["col"]
+    let lit = ""
+    let isFloat = false
+
+    while lex["pos"] < len(lex["source"]) && lex["ch"] >= "0" && lex["ch"] <= "9" {
+        lit = lit + lex["ch"]
+        advanceChar(lex)
+    }
+
+    if lex["pos"] < len(lex["source"]) && lex["ch"] == "." {
+        if lex["pos"] + 1 < len(lex["source"]) {
+            let nextCh = char_at(lex["source"], lex["pos"] + 1)
+            if nextCh >= "0" && nextCh <= "9" {
+                isFloat = true
+                lit = lit + "."
+                advanceChar(lex)
+                while lex["pos"] < len(lex["source"]) && lex["ch"] >= "0" && lex["ch"] <= "9" {
+                    lit = lit + lex["ch"]
+                    advanceChar(lex)
+                }
+            }
+        }
+    }
+
+    if isFloat {
+        return {"type": "FLOAT", "literal": lit, "line": startLine, "col": startCol}
+    }
+    return {"type": "INT", "literal": lit, "line": startLine, "col": startCol}
+}
+
+let keywords = {"true": "TRUE", "false": "FALSE", "nil": "NIL", "let": "LET", "fn": "FN", "return": "RETURN", "if": "IF", "else": "ELSE", "while": "WHILE"}
+
+fn readIdent(lex) {
+    let startLine = lex["line"]
+    let startCol = lex["col"]
+    let lit = ""
+    let reading = true
+
+    while lex["pos"] < len(lex["source"]) && reading {
+        let ch = lex["ch"]
+        if (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch == "_" {
+            lit = lit + ch
+            advanceChar(lex)
+        } else {
+            reading = false
+        }
+    }
+
+    if keywords[lit] != nil {
+        return {"type": keywords[lit], "literal": lit, "line": startLine, "col": startCol}
+    }
+    return {"type": "IDENT", "literal": lit, "line": startLine, "col": startCol}
+}
+
+fn readString(lex) {
+    let startLine = lex["line"]
+    let startCol = lex["col"]
+    advanceChar(lex)
+    let result = ""
+
+    while lex["pos"] < len(lex["source"]) && lex["ch"] != "\"" {
+        if lex["ch"] == "\\" {
+            advanceChar(lex)
+            if lex["ch"] == "n" {
+                result = result + "\n"
+            } else if lex["ch"] == "t" {
+                result = result + "\t"
+            } else if lex["ch"] == "\\" {
+                result = result + "\\"
+            } else if lex["ch"] == "\"" {
+                result = result + "\""
+            } else {
+                result = result + "\\" + lex["ch"]
+            }
+            advanceChar(lex)
+        } else if lex["ch"] == "\n" {
+            result = result + "\n"
+            advanceChar(lex)
+        } else {
+            result = result + lex["ch"]
+            advanceChar(lex)
+        }
+    }
+
+    if lex["pos"] >= len(lex["source"]) {
+        return {"type": "ERROR", "literal": "unterminated string", "line": startLine, "col": startCol}
+    }
+
+    advanceChar(lex)
+    return {"type": "STRING", "literal": result, "line": startLine, "col": startCol}
+}
+
+fn nextToken(lex) {
+    skipWhitespace(lex)
+
+    let startLine = lex["line"]
+    let startCol = lex["col"]
+
+    if lex["pos"] >= len(lex["source"]) {
+        return {"type": "EOF", "literal": "", "line": startLine, "col": startCol}
+    }
+
+    let ch = lex["ch"]
+
+    if ch == "\n" {
+        advanceChar(lex)
+        return {"type": "NEWLINE", "literal": "\n", "line": startLine, "col": startCol}
+    }
+
+    if ch >= "0" && ch <= "9" {
+        return readNumber(lex)
+    }
+
+    if ch == "\"" {
+        return readString(lex)
+    }
+
+    if (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" {
+        return readIdent(lex)
+    }
+
+    if ch == "=" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "=" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "EQ", "literal": "==", "line": startLine, "col": startCol}
+    }
+    if ch == "!" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "=" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "NEQ", "literal": "!=", "line": startLine, "col": startCol}
+    }
+    if ch == "<" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "=" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "LTE", "literal": "<=", "line": startLine, "col": startCol}
+    }
+    if ch == ">" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "=" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "GTE", "literal": ">=", "line": startLine, "col": startCol}
+    }
+    if ch == "-" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == ">" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "ARROW", "literal": "->", "line": startLine, "col": startCol}
+    }
+    if ch == "&" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "&" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "AND", "literal": "&&", "line": startLine, "col": startCol}
+    }
+    if ch == "|" && lex["pos"] + 1 < len(lex["source"]) && char_at(lex["source"], lex["pos"] + 1) == "|" {
+        advanceChar(lex)
+        advanceChar(lex)
+        return {"type": "OR", "literal": "||", "line": startLine, "col": startCol}
+    }
+
+    advanceChar(lex)
+    if ch == "+" { return {"type": "PLUS", "literal": "+", "line": startLine, "col": startCol} }
+    if ch == "-" { return {"type": "MINUS", "literal": "-", "line": startLine, "col": startCol} }
+    if ch == "*" { return {"type": "STAR", "literal": "*", "line": startLine, "col": startCol} }
+    if ch == "/" { return {"type": "SLASH", "literal": "/", "line": startLine, "col": startCol} }
+    if ch == "%" { return {"type": "PERCENT", "literal": "%", "line": startLine, "col": startCol} }
+    if ch == "=" { return {"type": "ASSIGN", "literal": "=", "line": startLine, "col": startCol} }
+    if ch == "<" { return {"type": "LT", "literal": "<", "line": startLine, "col": startCol} }
+    if ch == ">" { return {"type": "GT", "literal": ">", "line": startLine, "col": startCol} }
+    if ch == "!" { return {"type": "NOT", "literal": "!", "line": startLine, "col": startCol} }
+    if ch == "(" { return {"type": "LPAREN", "literal": "(", "line": startLine, "col": startCol} }
+    if ch == ")" { return {"type": "RPAREN", "literal": ")", "line": startLine, "col": startCol} }
+    if ch == "{" { return {"type": "LBRACE", "literal": "{", "line": startLine, "col": startCol} }
+    if ch == "}" { return {"type": "RBRACE", "literal": "}", "line": startLine, "col": startCol} }
+    if ch == "[" { return {"type": "LBRACKET", "literal": "[", "line": startLine, "col": startCol} }
+    if ch == "]" { return {"type": "RBRACKET", "literal": "]", "line": startLine, "col": startCol} }
+    if ch == "," { return {"type": "COMMA", "literal": ",", "line": startLine, "col": startCol} }
+    if ch == ":" { return {"type": "COLON", "literal": ":", "line": startLine, "col": startCol} }
+    if ch == "." { return {"type": "DOT", "literal": ".", "line": startLine, "col": startCol} }
+    if ch == ";" { return {"type": "SEMICOLON", "literal": ";", "line": startLine, "col": startCol} }
+
+    return {"type": "ERROR", "literal": ch, "line": startLine, "col": startCol}
+}
