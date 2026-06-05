@@ -218,6 +218,11 @@ func (l *Lexer) NextToken() Token {
 		l.advanceChar()
 		return Token{Type: TOKEN_ARROW, Literal: "->", Line: startLine, Col: startCol}
 	}
+	if ch == '.' && l.pos+1 < len(l.source) && l.source[l.pos+1] == '.' {
+		l.advanceChar()
+		l.advanceChar()
+		return Token{Type: TOKEN_DOTDOT, Literal: "..", Line: startLine, Col: startCol}
+	}
 	if ch == '&' && l.pos+1 < len(l.source) && l.source[l.pos+1] == '&' {
 		l.advanceChar()
 		l.advanceChar()
@@ -227,6 +232,11 @@ func (l *Lexer) NextToken() Token {
 		l.advanceChar()
 		l.advanceChar()
 		return Token{Type: TOKEN_OR, Literal: "||", Line: startLine, Col: startCol}
+	}
+	if ch == '|' && l.pos+1 < len(l.source) && l.source[l.pos+1] == '>' {
+		l.advanceChar()
+		l.advanceChar()
+		return Token{Type: TOKEN_PIPE, Literal: "|>", Line: startLine, Col: startCol}
 	}
 
 	// Single-character tokens

@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Parser is a recursive descent parser for the Zero language.
@@ -71,12 +72,20 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseVarDecl()
 	case TOKEN_FN:
 		return p.parseFuncDef()
+	case TOKEN_PURE:
+		return p.parsePureFuncDef()
 	case TOKEN_IF:
 		return p.parseIf()
 	case TOKEN_WHILE:
 		return p.parseWhile()
 	case TOKEN_RETURN:
 		return p.parseReturn()
+	case TOKEN_MATCH:
+		return &ExprStmt{Expr: p.parseMatch()}
+	case TOKEN_ENUM:
+		return p.parseEnum()
+	case TOKEN_AI:
+		return p.parseAIFuncDef()
 	case TOKEN_IDENT:
 		// Check if this is an assignment: IDENT ASSIGN
 		if p.peek.Type == TOKEN_ASSIGN {
@@ -123,7 +132,7 @@ func (p *Parser) parseAssign() *Assign {
 	return &Assign{Token: nameTok, Name: nameTok.Literal, Value: value}
 }
 
-// parseFuncDef parses: fn name(params) { body }
+// parseFuncDef parses: fn name(params) [effects: [io, netio]] [-> type] { body }
 func (p *Parser) parseFuncDef() *FuncDef {
 	tok := p.expect(TOKEN_FN)
 	name := p.expect(TOKEN_IDENT).Literal
@@ -140,8 +149,86 @@ func (p *Parser) parseFuncDef() *FuncDef {
 		}
 	}
 	p.expect(TOKEN_RPAREN)
+
+	// Optional: effects: [io, netio, ...]
+	var effects []EffectAnnot
+	if p.match(TOKEN_EFFECTS) {
+		p.expect(TOKEN_COLON)
+		p.expect(TOKEN_LBRACKET)
+		if p.current.Type != TOKEN_RBRACKET {
+			for {
+				effectTok := p.current
+				p.advance()
+				effects = append(effects, EffectAnnot{
+					Token: effectTok,
+					Name:  effectTok.Literal,
+				})
+				if !p.match(TOKEN_COMMA) {
+					break
+				}
+			}
+		}
+		p.expect(TOKEN_RBRACKET)
+	}
+
+	// Optional: -> ReturnType
+	returnType := ""
+	if p.match(TOKEN_ARROW) {
+		returnType = p.expect(TOKEN_IDENT).Literal
+	}
+
 	body := p.parseBlock()
-	return &FuncDef{Token: tok, Name: name, Params: params, Body: body}
+	return &FuncDef{
+		Token:      tok,
+		Name:       name,
+		Params:     params,
+		Body:       body,
+		Effects:    effects,
+		ReturnType: returnType,
+	}
+}
+
+// parsePureFuncDef parses: pure fn name(params) [-> type] { body }
+// A pure function has no side effects — the compiler tracks this.
+func (p *Parser) parsePureFuncDef() *FuncDef {
+	tok := p.expect(TOKEN_PURE)
+	p.expect(TOKEN_FN)
+	name := p.expect(TOKEN_IDENT).Literal
+
+	p.expect(TOKEN_LPAREN)
+	var params []Param
+	if p.current.Type != TOKEN_RPAREN {
+		for {
+			paramTok := p.expect(TOKEN_IDENT)
+			params = append(params, Param{Token: paramTok, Name: paramTok.Literal})
+			if !p.match(TOKEN_COMMA) {
+				break
+			}
+		}
+	}
+	p.expect(TOKEN_RPAREN)
+
+	// Optional: -> ReturnType
+	returnType := ""
+	if p.match(TOKEN_ARROW) {
+		returnType = p.expect(TOKEN_IDENT).Literal
+	}
+
+	body := p.parseBlock()
+
+	// Mark as pure by adding a "pure" effect annotation
+	effects := []EffectAnnot{
+		{Token: tok, Name: "pure"},
+	}
+
+	return &FuncDef{
+		Token:      tok,
+		Name:       name,
+		Params:     params,
+		Body:       body,
+		Effects:    effects,
+		ReturnType: returnType,
+	}
 }
 
 // skipNewlines advances past any consecutive TOKEN_NEWLINE tokens.
@@ -223,6 +310,8 @@ func (p *Parser) parseExpression() Expr {
 // Higher values bind more tightly.
 func precedence(typ TokenType) int {
 	switch typ {
+	case TOKEN_PIPE:
+		return 0
 	case TOKEN_OR:
 		return 1
 	case TOKEN_AND:
@@ -245,7 +334,7 @@ func isBinaryOp(typ TokenType) bool {
 	switch typ {
 	case TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT,
 		TOKEN_EQ, TOKEN_NEQ, TOKEN_LT, TOKEN_GT, TOKEN_LTE, TOKEN_GTE,
-		TOKEN_AND, TOKEN_OR:
+		TOKEN_AND, TOKEN_OR, TOKEN_PIPE:
 		return true
 	}
 	return false
@@ -255,12 +344,16 @@ func isBinaryOp(typ TokenType) bool {
 func (p *Parser) parsePrecedence(minPrec int) Expr {
 	left := p.parsePrimary()
 
-	// Handle postfix operators: call ( ) and index [ ]
+	// Handle postfix operators: call ( ), index [ ], and dot .
 	for {
 		if p.current.Type == TOKEN_LPAREN {
 			left = p.parseCall(left)
 		} else if p.current.Type == TOKEN_LBRACKET {
 			left = p.parseIndex(left)
+		} else if p.current.Type == TOKEN_DOT {
+			p.advance()
+			field := p.expect(TOKEN_IDENT).Literal
+			left = &DotExpr{Token: p.current, Object: left, Field: field}
 		} else {
 			break
 		}
@@ -268,6 +361,37 @@ func (p *Parser) parsePrecedence(minPrec int) Expr {
 
 	// Handle binary operators
 	for isBinaryOp(p.current.Type) && precedence(p.current.Type) >= minPrec {
+		// Pipe operator has special parsing: args follow without parentheses
+		if p.current.Type == TOKEN_PIPE {
+			p.advance() // consume |>
+			tok := p.current
+			name := p.expect(TOKEN_IDENT).Literal
+			var args []Expr
+			// Collect arguments until we hit another |>, newline, or EOF
+			for p.current.Type != TOKEN_PIPE &&
+				p.current.Type != TOKEN_NEWLINE &&
+				p.current.Type != TOKEN_EOF &&
+				p.current.Type != TOKEN_RBRACE &&
+				p.current.Type != TOKEN_RPAREN {
+				if p.current.Type == TOKEN_COMMA {
+					break
+				}
+				args = append(args, p.parsePrimary())
+			}
+			step := PipelineStep{Token: tok, Name: name, Args: args}
+			if pipeExpr, ok := left.(*PipelineExpr); ok {
+				pipeExpr.Steps = append(pipeExpr.Steps, step)
+				left = pipeExpr
+			} else {
+				left = &PipelineExpr{
+					Token: tok,
+					Expr:  left,
+					Steps: []PipelineStep{step},
+				}
+			}
+			continue
+		}
+
 		opTok := p.advance()
 		prec := precedence(opTok.Type)
 		right := p.parsePrecedence(prec + 1)
@@ -279,6 +403,10 @@ func (p *Parser) parsePrecedence(minPrec int) Expr {
 				left = p.parseCall(left)
 			} else if p.current.Type == TOKEN_LBRACKET {
 				left = p.parseIndex(left)
+			} else if p.current.Type == TOKEN_DOT {
+				p.advance()
+				field := p.expect(TOKEN_IDENT).Literal
+				left = &DotExpr{Token: p.current, Object: left, Field: field}
 			} else {
 				break
 			}
@@ -361,6 +489,29 @@ func (p *Parser) parsePrimary() Expr {
 		operand := p.parsePrecedence(7) // unary precedence
 		return &UnaryExpr{Token: tok, Op: tok.Type, Operand: operand}
 
+	case TOKEN_SPAWN:
+		return p.parseSpawn()
+
+	case TOKEN_SEND:
+		return p.parseSend()
+
+	case TOKEN_RECEIVE:
+		return p.parseReceive()
+
+	case TOKEN_CHANNEL:
+		return p.parseChannel()
+	case TOKEN_MATCH:
+		return p.parseMatch()
+	case TOKEN_SNAPSHOT:
+		return p.parseSnapshot()
+	case TOKEN_RESTORE:
+		return p.parseRestore()
+	case TOKEN_REPLAY:
+		return p.parseReplay()
+	case TOKEN_PURE:
+		// pure fn as expression: not supported in expression context
+		panic(fmt.Sprintf("parser: pure fn definition is only allowed as a statement at line %d", p.current.Line))
+
 	default:
 		panic(fmt.Sprintf("parser: unexpected token %s at line %d col %d",
 			p.current.Type, p.current.Line, p.current.Col))
@@ -408,4 +559,229 @@ func (p *Parser) parseMapLiteral() *MapLiteral {
 	}
 	p.expect(TOKEN_RBRACE)
 	return &MapLiteral{Token: tok, Keys: keys, Values: values}
+}
+
+// parseMatch parses: match expr { case pattern -> expr, ... }
+func (p *Parser) parseMatch() *MatchExpression {
+	tok := p.expect(TOKEN_MATCH)
+	value := p.parseExpression()
+	p.skipNewlines()
+	p.expect(TOKEN_LBRACE)
+	p.skipNewlines()
+	var cases []MatchCase
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		if p.match(TOKEN_NEWLINE) {
+			continue
+		}
+		p.expect(TOKEN_CASE)
+		pattern := p.parseExpression()
+		p.expect(TOKEN_ARROW)
+		body := p.parseExpression()
+
+		// Extract token from pattern
+		var patToken Token
+		switch pat := pattern.(type) {
+		case *IntLiteral:
+			patToken = pat.Token
+		case *StringLiteral:
+			patToken = pat.Token
+		case *FloatLiteral:
+			patToken = pat.Token
+		case *BoolLiteral:
+			patToken = pat.Token
+		case *Identifier:
+			patToken = pat.Token
+		default:
+			patToken = tok // fallback
+		}
+
+		cases = append(cases, MatchCase{Token: patToken, Pattern: pattern, Body: body})
+		p.match(TOKEN_COMMA) // optional trailing comma
+		p.skipNewlines()
+	}
+	p.expect(TOKEN_RBRACE)
+	return &MatchExpression{Token: tok, Value: value, Cases: cases}
+}
+
+// parseEnum parses: enum Name { Variant1, Variant2(args...) }
+func (p *Parser) parseEnum() *EnumDef {
+	tok := p.expect(TOKEN_ENUM)
+	name := p.expect(TOKEN_IDENT).Literal
+	p.skipNewlines()
+	p.expect(TOKEN_LBRACE)
+	p.skipNewlines()
+	var variants []EnumVariant
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		if p.match(TOKEN_NEWLINE) {
+			continue
+		}
+		vtok := p.current
+		vname := p.advance().Literal
+		arity := 0
+		if p.current.Type == TOKEN_LPAREN {
+			p.advance()
+			// count params
+			if p.current.Type != TOKEN_RPAREN {
+				arity = 1
+				p.advance() // consume first param name
+				for p.match(TOKEN_COMMA) {
+					p.advance() // consume subsequent param names
+					arity++
+				}
+			}
+			p.expect(TOKEN_RPAREN)
+		}
+		variants = append(variants, EnumVariant{Token: vtok, Name: vname, Arity: arity})
+		p.match(TOKEN_COMMA) // optional trailing comma
+		p.skipNewlines()
+	}
+	p.expect(TOKEN_RBRACE)
+	return &EnumDef{Token: tok, Name: name, Variants: variants}
+}
+
+// parseSpawn parses: spawn fn_name(args)
+func (p *Parser) parseSpawn() *SpawnExpr {
+	tok := p.expect(TOKEN_SPAWN)
+	callee := p.parsePrimary()
+	var args []Expr
+	if p.current.Type == TOKEN_LPAREN {
+		p.advance()
+		if p.current.Type != TOKEN_RPAREN {
+			args = append(args, p.parseExpression())
+			for p.match(TOKEN_COMMA) {
+				args = append(args, p.parseExpression())
+			}
+		}
+		p.expect(TOKEN_RPAREN)
+	}
+	return &SpawnExpr{Token: tok, Callee: callee, Args: args}
+}
+
+// parseSend parses: send(channel, value)
+func (p *Parser) parseSend() *SendExpr {
+	tok := p.expect(TOKEN_SEND)
+	p.expect(TOKEN_LPAREN)
+	channel := p.parseExpression()
+	p.expect(TOKEN_COMMA)
+	value := p.parseExpression()
+	p.expect(TOKEN_RPAREN)
+	return &SendExpr{Token: tok, Channel: channel, Value: value}
+}
+
+// parseReceive parses: receive(channel)
+func (p *Parser) parseReceive() *ReceiveExpr {
+	tok := p.expect(TOKEN_RECEIVE)
+	p.expect(TOKEN_LPAREN)
+	channel := p.parseExpression()
+	p.expect(TOKEN_RPAREN)
+	return &ReceiveExpr{Token: tok, Channel: channel}
+}
+
+// parseChannel parses: channel()
+func (p *Parser) parseChannel() *ChannelExpr {
+	tok := p.expect(TOKEN_CHANNEL)
+	p.expect(TOKEN_LPAREN)
+	p.expect(TOKEN_RPAREN)
+	return &ChannelExpr{Token: tok}
+}
+
+// parseSnapshot parses: snapshot()
+func (p *Parser) parseSnapshot() *SnapshotExpr {
+	tok := p.expect(TOKEN_SNAPSHOT)
+	p.expect(TOKEN_LPAREN)
+	p.expect(TOKEN_RPAREN)
+	return &SnapshotExpr{Token: tok}
+}
+
+// parseRestore parses: restore(index)
+func (p *Parser) parseRestore() *RestoreExpr {
+	tok := p.expect(TOKEN_RESTORE)
+	p.expect(TOKEN_LPAREN)
+	index := p.parseExpression()
+	p.expect(TOKEN_RPAREN)
+	return &RestoreExpr{Token: tok, Index: index}
+}
+
+// parseReplay parses: replay(index)
+func (p *Parser) parseReplay() *ReplayExpr {
+	tok := p.expect(TOKEN_REPLAY)
+	p.expect(TOKEN_LPAREN)
+	index := p.parseExpression()
+	p.expect(TOKEN_RPAREN)
+	return &ReplayExpr{Token: tok, Index: index}
+}
+
+// parseAIFuncDef parses: ai fn name(args) -> type { prompt: "..." [model: "..."] [cache: true/false] }
+func (p *Parser) parseAIFuncDef() *AIFuncDef {
+	tok := p.expect(TOKEN_AI)
+	p.expect(TOKEN_FN)
+	name := p.expect(TOKEN_IDENT).Literal
+
+	// Parse parameters
+	p.expect(TOKEN_LPAREN)
+	var params []Param
+	if p.current.Type != TOKEN_RPAREN {
+		for {
+			paramTok := p.expect(TOKEN_IDENT)
+			params = append(params, Param{Token: paramTok, Name: paramTok.Literal})
+			if !p.match(TOKEN_COMMA) {
+				break
+			}
+		}
+	}
+	p.expect(TOKEN_RPAREN)
+
+	// Optional return type
+	returnType := ""
+	if p.match(TOKEN_ARROW) {
+		returnType = p.expect(TOKEN_IDENT).Literal
+	}
+
+	// Parse AI function body: { prompt: "..." [model: "..."] [cache: true/false] }
+	p.expect(TOKEN_LBRACE)
+	prompt := ""
+	model := ""
+	cache := false
+
+	// Parse block contents — support key: value pairs
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		if p.match(TOKEN_NEWLINE) {
+			continue
+		}
+		// Accept keywords as keys too (prompt, model, cache are keywords)
+		var key string
+		if p.current.Type == TOKEN_IDENT {
+			key = p.advance().Literal
+		} else {
+			key = p.advance().Type.String()
+			// Lowercase the token name: "PROMPT" -> "prompt"
+			key = strings.ToLower(key)
+		}
+		p.expect(TOKEN_COLON)
+		switch key {
+		case "prompt":
+			prompt = p.expect(TOKEN_STRING).Literal
+		case "model":
+			model = p.expect(TOKEN_STRING).Literal
+		case "cache":
+			cache = p.current.Type == TOKEN_TRUE
+			p.advance()
+		default:
+			panic(fmt.Sprintf("parser: unknown AI function property %q at line %d col %d",
+				key, p.current.Line, p.current.Col))
+		}
+		// optional newline between properties
+		p.match(TOKEN_NEWLINE)
+	}
+	p.expect(TOKEN_RBRACE)
+
+	return &AIFuncDef{
+		Token:      tok,
+		Name:       name,
+		Params:     params,
+		ReturnType: returnType,
+		Prompt:     prompt,
+		Model:      model,
+		Cache:      cache,
+	}
 }

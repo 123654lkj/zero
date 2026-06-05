@@ -115,32 +115,27 @@ const (
 // ──────────────────────────────────────────────────────────────────────────────
 // Concurrency  0xC0–0xDF  (Phase 1+)
 // ──────────────────────────────────────────────────────────────────────────────
-//
-// Planned opcodes (Phase 1+):
-//
-//	OP_SPAWN   — Launch a goroutine / async task
-//	OP_SEND    — Send a value on a channel
-//	OP_RECEIVE — Receive a value from a channel
-//	OP_CHAN_NEW — Create a new channel
-//	OP_JOIN    — Wait for a goroutine to finish
-//	OP_SELECT  — Multiplex over multiple channels
-//	0xC6–0xDF  — Reserved for MUTEX, LOCK, UNLOCK, etc.
+const (
+	OP_SPAWN    Opcode = 0xC3 // Launch goroutine (1-byte: arg count)
+	OP_SEND     Opcode = 0xC4 // Send value on channel
+	OP_RECEIVE  Opcode = 0xC5 // Receive value from channel
+	OP_CHAN_NEW Opcode = 0xC6 // Create new channel
+
+	// 0xC7–0xDF — Reserved for JOIN, SELECT, MUTEX, LOCK, UNLOCK, etc.
+)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Zero-specific features  0xE0–0xFF  (Phase 2+)
 // ──────────────────────────────────────────────────────────────────────────────
-//
-// Planned opcodes (Phase 2+):
-//
-//	OP_IO_OPEN    — Open a file / resource
-//	OP_IO_READ    — Read from a handle
-//	OP_IO_WRITE   — Write to a handle
-//	OP_IO_CLOSE   — Close a handle
-//	OP_IMAGE_LOAD — Load an image
-//	OP_IMAGE_SAVE — Save an image
-//	OP_IMAGE_PROC — Process / transform an image
-//	OP_QUERY_EXEC — Execute a structured query
-//	OP_AI_INFER   — Run an AI inference call
+
+const (
+	OP_AI_CALL Opcode = 0xE0 // 0xE0 — Call an AI function (2-byte AI function index)
+	OP_SNAPSHOT Opcode = 0xE1 // 0xE1 — Take snapshot of VM state, push index
+	OP_RESTORE  Opcode = 0xE2 // 0xE2 — Restore VM state from snapshot (pop index)
+	OP_REPLAY   Opcode = 0xE3 // 0xE3 — Replay from snapshot (pop index, restore + re-execute)
+
+	// 0xE4–0xFF reserved for future zero-specific ops
+)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Operand counts
@@ -208,6 +203,20 @@ var operandCounts = map[Opcode]int{
 	// Phase 0 specials
 	OP_PRINT: 0,
 	OP_HALT:  0,
+
+	// AI operations
+	OP_AI_CALL: 2, // 2-byte AI function index
+
+	// Snapshot operations — 0 operands (index is pushed/popped on stack)
+	OP_SNAPSHOT: 0,
+	OP_RESTORE:  0,
+	OP_REPLAY:   0,
+
+	// Concurrency
+	OP_SPAWN:    1, // 1-byte argument count
+	OP_SEND:     0,
+	OP_RECEIVE:  0,
+	OP_CHAN_NEW: 0,
 }
 
 // OperandCount returns the number of operand bytes that follow this opcode
@@ -267,6 +276,14 @@ var opcodeNames = map[Opcode]string{
 	OP_MAP_SET:      "MAP_SET",
 	OP_PRINT:        "PRINT",
 	OP_HALT:         "HALT",
+	OP_AI_CALL:      "AI_CALL",
+	OP_SPAWN:        "SPAWN",
+	OP_SEND:         "SEND",
+	OP_RECEIVE:      "RECEIVE",
+	OP_CHAN_NEW:     "CHAN_NEW",
+	OP_SNAPSHOT:     "SNAPSHOT",
+	OP_RESTORE:      "RESTORE",
+	OP_REPLAY:       "REPLAY",
 }
 
 // Name returns the human-readable name of the opcode (e.g. "ADD", "JMP_IF").

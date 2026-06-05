@@ -28,13 +28,24 @@ type FunctionMeta struct {
 	End          int // byte offset where function body ends
 }
 
+// AIFunctionMeta describes an AI function defined in this chunk.
+type AIFunctionMeta struct {
+	Name       string
+	ParamNames []string // parameter names for prompt template substitution
+	Prompt     string   // prompt template with {{param}} placeholders
+	Model      string   // optional model specification (empty = default)
+	Cache      bool     // whether to cache responses
+	ReturnType string   // optional return type annotation
+}
+
 // Chunk is the bytecode container for a Zero module or function body.
 type Chunk struct {
-	Code      []byte          // raw instruction bytes
-	Constants []value.Value   // constant pool
-	Names     []string        // global name table
-	Lines     []int           // line number for each byte in Code
-	Functions []FunctionMeta  // function metadata
+	Code        []byte          // raw instruction bytes
+	Constants   []value.Value   // constant pool
+	Names       []string        // global name table
+	Lines       []int           // line number for each byte in Code
+	Functions   []FunctionMeta  // function metadata
+	AIFunctions []AIFunctionMeta // AI function metadata
 }
 
 // NewChunk creates an empty Chunk ready to accept instructions.
@@ -96,6 +107,13 @@ func (c *Chunk) AddName(name string) int {
 func (c *Chunk) AddFunction(meta FunctionMeta) int {
 	idx := len(c.Functions)
 	c.Functions = append(c.Functions, meta)
+	return idx
+}
+
+// AddAIFunction appends AI function metadata and returns its index.
+func (c *Chunk) AddAIFunction(meta AIFunctionMeta) int {
+	idx := len(c.AIFunctions)
+	c.AIFunctions = append(c.AIFunctions, meta)
 	return idx
 }
 

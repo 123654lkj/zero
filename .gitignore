@@ -25,3 +25,6 @@ Thumbs.db
 *.log
 *.tmp
 debug/
+
+# Zero binary
+go/zero

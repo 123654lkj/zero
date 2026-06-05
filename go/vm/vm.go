@@ -8,11 +8,39 @@ package vm
 
 import (
 	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/123654lkj/zero/go/chunk"
 	"github.com/123654lkj/zero/go/opcode"
 	"github.com/123654lkj/zero/go/value"
 )
+
+// ---------------------------------------------------------------------------
+// AI Backend interface (Phase 2 mock — real integration in Phase 3)
+// ---------------------------------------------------------------------------
+
+// AIBackend is the interface for AI inference backends.
+type AIBackend interface {
+	Call(prompt string, model string) (string, error)
+}
+
+// mockAIBackend is a default mock that returns placeholder responses.
+type mockAIBackend struct{}
+
+func (m *mockAIBackend) Call(prompt string, model string) (string, error) {
+	return "[AI response placeholder]", nil
+}
+
+// SnapshotEntry captures the complete VM state at a point in time.
+type SnapshotEntry struct {
+	stack      [stackSize]value.Value
+	stackTop   int
+	frames     [frameLimit]Frame
+	frameCount int
+	globals    map[string]value.Value
+}
 
 // ---------------------------------------------------------------------------
 // Frame (call frame)
@@ -42,13 +70,25 @@ type VM struct {
 	frameCount int
 	globals    map[string]value.Value
 	natives    map[string]BuiltinFunc
+	aiBackend  AIBackend // AI inference backend
+
+	// Actor model: channel registry
+	channels   map[int]chan value.Value
+	nextChanID int64 // atomic counter for channel IDs
+	nextPID    int64 // atomic counter for process IDs
+	mu         sync.Mutex
+
+	// Snapshot support
+	snapshots []SnapshotEntry
 }
 
 // NewVM creates a new VM with built-in functions registered as globals.
 func NewVM() *VM {
 	vm := &VM{
-		globals: make(map[string]value.Value),
-		natives: make(map[string]BuiltinFunc),
+		globals:   make(map[string]value.Value),
+		natives:   make(map[string]BuiltinFunc),
+		channels:  make(map[int]chan value.Value),
+		aiBackend: &mockAIBackend{},
 	}
 	vm.registerBuiltin("print", builtinPrint)
 	vm.registerBuiltin("len", builtinLen)
@@ -67,7 +107,101 @@ func (vm *VM) registerBuiltin(name string, fn BuiltinFunc) {
 	vm.globals[name] = value.StringValue(name)
 }
 
+// SetAIBackend replaces the current AI inference backend.
+func (vm *VM) SetAIBackend(backend AIBackend) {
+	vm.aiBackend = backend
+}
+
+// GetAIBackend returns the current AI inference backend.
+func (vm *VM) GetAIBackend() AIBackend {
+	return vm.aiBackend
+}
+
+// aiFormatPrompt formats a prompt template by substituting {{param}} placeholders
+// with the corresponding argument values.
+func aiFormatPrompt(template string, paramNames []string, args []value.Value) string {
+	result := template
+	for i, name := range paramNames {
+		if i < len(args) {
+			placeholder := "{{" + name + "}}"
+			result = strings.ReplaceAll(result, placeholder, formatValue(args[i]))
+		}
+	}
+	return result
+}
+
 // ---------------------------------------------------------------------------
+// deepCopyValue creates a deep copy of a value.Value to prevent aliasing
+// issues when snapshots reference the same heap objects.
+func deepCopyValue(v value.Value) value.Value {
+	if v.IsNil() || v.IsBool() || v.IsInt() || v.IsFloat() {
+		return v // these are immutable / by-value
+	}
+	if v.IsString() {
+		// strings are immutable in Go, safe to share
+		return v
+	}
+	if v.IsArray() {
+		arr := v.AsArray()
+		copyArr := make([]value.Value, len(arr))
+		for i, elem := range arr {
+			copyArr[i] = deepCopyValue(elem)
+		}
+		return value.ArrayValue(copyArr)
+	}
+	if v.IsMap() {
+		m := v.AsMap()
+		copyMap := make(map[string]value.Value, len(m))
+		for k, val := range m {
+			copyMap[k] = deepCopyValue(val)
+		}
+		return value.MapValue(copyMap)
+	}
+	// Unknown / future types — return as-is (safe for read-only use)
+	return v
+}
+
+// takeSnapshot captures the current VM state and appends it to the snapshots
+// list. Returns the zero-based index of the new snapshot.
+func (vm *VM) takeSnapshot() int {
+	// Deep-copy globals so mutations after the snapshot don't corrupt it.
+	gCopy := make(map[string]value.Value, len(vm.globals))
+	for k, v := range vm.globals {
+		gCopy[k] = deepCopyValue(v)
+	}
+
+	snap := SnapshotEntry{
+		stackTop:   vm.stackTop,
+		frameCount: vm.frameCount,
+		globals:    gCopy,
+	}
+	copy(snap.stack[:], vm.stack[:])
+	copy(snap.frames[:], vm.frames[:])
+
+	vm.snapshots = append(vm.snapshots, snap)
+	return len(vm.snapshots) - 1
+}
+
+// restoreSnapshot restores the VM to a previously taken snapshot.
+// It does NOT replay any code — the PC continues from the current position.
+func (vm *VM) restoreSnapshot(index int) {
+	if index < 0 || index >= len(vm.snapshots) {
+		panic(fmt.Sprintf("restore: invalid snapshot index %d", index))
+	}
+	snap := vm.snapshots[index]
+
+	vm.stackTop = snap.stackTop
+	vm.frameCount = snap.frameCount
+	copy(vm.stack[:snap.stackTop], snap.stack[:snap.stackTop])
+	copy(vm.frames[:snap.frameCount], snap.frames[:snap.frameCount])
+
+	// Deep-copy globals back so the live state doesn't alias the snapshot.
+	vm.globals = make(map[string]value.Value, len(snap.globals))
+	for k, v := range snap.globals {
+		vm.globals[k] = deepCopyValue(v)
+	}
+}
+
 // Stack helpers
 // ---------------------------------------------------------------------------
 
@@ -400,16 +534,155 @@ func (vm *VM) Run() {
 			m.AsMap()[key.AsString()] = val
 			vm.Push(val)
 
-		default:
-			panic(fmt.Sprintf("unknown opcode: 0x%02X", byte(op)))
-		}
-	}
-}
+		// ── Concurrency / Actor Model ─────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Frame helpers
-// ---------------------------------------------------------------------------
+		case opcode.OP_CHAN_NEW:
+			// Create a new buffered channel and push its ID
+			id := int(atomic.AddInt64(&vm.nextChanID, 1))
+			ch := make(chan value.Value, 16) // buffered to avoid deadlocks
+			vm.mu.Lock()
+			vm.channels[id] = ch
+			vm.mu.Unlock()
+			vm.Push(value.IntValue(int64(id)))
 
+		case opcode.OP_SEND:
+			val := vm.Pop()
+			chanID := vm.Pop()
+			if !chanID.IsInt() {
+				panic("send: channel ID must be an int")
+			}
+			id := int(chanID.AsInt())
+			vm.mu.Lock()
+			ch, ok := vm.channels[id]
+			vm.mu.Unlock()
+			if !ok {
+				panic(fmt.Sprintf("send: unknown channel ID %d", id))
+			}
+			ch <- val
+			vm.Push(val) // push sent value back for chaining
+
+		case opcode.OP_RECEIVE:
+			chanID := vm.Pop()
+			if !chanID.IsInt() {
+				panic("receive: channel ID must be an int")
+			}
+			id := int(chanID.AsInt())
+			vm.mu.Lock()
+			ch, ok := vm.channels[id]
+			vm.mu.Unlock()
+			if !ok {
+				panic(fmt.Sprintf("receive: unknown channel ID %d", id))
+			}
+			val := <-ch
+			vm.Push(val)
+
+		case opcode.OP_SPAWN:
+			argCount := int(vm.readByte(frame))
+			// Stack: [..., Fn, A0, A1, ..., A_{n-1}]
+			fnSlot := vm.stackTop - 1 - argCount
+			fnVal := vm.stack[fnSlot]
+
+			if !fnVal.IsString() {
+				panic("spawn: function must be a named function (string)")
+			}
+			fnName := fnVal.AsString()
+			meta, found := vm.findFunction(frame.Chunk, fnName)
+			if !found {
+				panic(fmt.Sprintf("spawn: undefined function: %s", fnName))
+			}
+
+			// Collect arguments
+			spawnArgs := make([]value.Value, argCount)
+			copy(spawnArgs, vm.stack[vm.stackTop-argCount:vm.stackTop])
+
+			// Remove function + arguments from stack
+			vm.stackTop = fnSlot
+
+			// Generate PID
+			pid := int(atomic.AddInt64(&vm.nextPID, 1))
+
+			// Capture the chunk and globals for the goroutine
+			spawnChunk := frame.Chunk
+			spawnGlobals := vm.globals
+
+			go func() {
+				// Create a fresh VM for the goroutine
+				svm := &VM{
+					globals:  spawnGlobals,
+					natives:  vm.natives,
+					channels: vm.channels,
+				}
+				// Push arguments as local variables
+				for _, a := range spawnArgs {
+					svm.Push(a)
+				}
+				svm.pushFrame(spawnChunk, meta.Start, 0)
+				svm.Run()
+			}()
+
+			// Push PID
+			vm.Push(value.IntValue(int64(pid)))
+
+		// ── AI Functions ───────────────────────────────────────────────
+
+		case opcode.OP_AI_CALL:
+			aiIdx := int(vm.readWord16(frame))
+			if aiIdx < 0 || aiIdx >= len(c.AIFunctions) {
+				panic(fmt.Sprintf("AI_CALL: invalid AI function index %d", aiIdx))
+			}
+			aiMeta := c.AIFunctions[aiIdx]
+
+			// Collect arguments from the stack
+			argCount := len(aiMeta.ParamNames)
+			args := make([]value.Value, argCount)
+			for i := argCount - 1; i >= 0; i-- {
+				args[i] = vm.Pop()
+			}
+
+			// Format the prompt template with arguments
+			formattedPrompt := aiFormatPrompt(aiMeta.Prompt, aiMeta.ParamNames, args)
+
+			// Call the AI backend
+			if vm.aiBackend == nil {
+				panic("AI_CALL: no AI backend configured")
+			}
+			result, err := vm.aiBackend.Call(formattedPrompt, aiMeta.Model)
+			if err != nil {
+				panic(fmt.Sprintf("AI_CALL: %v", err))
+			}
+
+			// Push the result
+			vm.Push(value.StringValue(result))
+
+			// ── Snapshot operations ───────────────────────────────────────
+
+			case opcode.OP_SNAPSHOT:
+				idx := vm.takeSnapshot()
+				vm.Push(value.IntValue(int64(idx)))
+
+			case opcode.OP_RESTORE:
+				idxVal := vm.Pop()
+				if !idxVal.IsInt() {
+					panic("restore: index must be an int")
+				}
+				vm.restoreSnapshot(int(idxVal.AsInt()))
+
+			case opcode.OP_REPLAY:
+				idxVal := vm.Pop()
+				if !idxVal.IsInt() {
+					panic("replay: index must be an int")
+				}
+				vm.restoreSnapshot(int(idxVal.AsInt()))
+
+			default:
+				panic(fmt.Sprintf("unknown opcode: 0x%02X", byte(op)))
+			}
+			}
+			}
+
+			// ---------------------------------------------------------------------------
+			// Frame helpers
+			// ---------------------------------------------------------------------------
 func (vm *VM) pushFrame(c *chunk.Chunk, ip, base int) {
 	if vm.frameCount >= frameLimit {
 		panic("call stack overflow")
