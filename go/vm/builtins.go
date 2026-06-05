@@ -2,6 +2,7 @@
 package vm
 
 import (
+	"os"
 	"fmt"
 	"strings"
 
@@ -88,4 +89,25 @@ func formatValue(v value.Value) string {
 	default:
 		return v.String()
 	}
+}
+func builtinCharAt(args []value.Value) value.Value {
+	if len(args) != 2 { panic("char_at needs 2 args") }
+	s := args[0].AsString()
+	i := int(args[1].AsInt())
+	if i < 0 || i >= len(s) { panic("char_at: index out of range") }
+	return value.StringValue(string(s[i]))
+}
+
+func builtinReadFile(args []value.Value) value.Value {
+	if len(args) != 1 { panic("read_file needs 1 arg") }
+	data, err := os.ReadFile(args[0].AsString())
+	if err != nil { panic("read_file: " + err.Error()) }
+	return value.StringValue(string(data))
+}
+
+func builtinWriteFile(args []value.Value) value.Value {
+	if len(args) != 2 { panic("write_file needs 2 args") }
+	err := os.WriteFile(args[0].AsString(), []byte(args[1].AsString()), 0644)
+	if err != nil { panic("write_file: " + err.Error()) }
+	return value.NilValue()
 }
