@@ -1,4 +1,4 @@
-// Package vm implements the Zero language bytecode virtual machine.
+﻿// Package vm implements the Zero language bytecode virtual machine.
 //
 // The VM is a stack-based interpreter that executes bytecode stored in Chunk
 // objects. It supports global and local variables, arithmetic, comparisons,
@@ -53,9 +53,6 @@ func NewVM() *VM {
 	vm.registerBuiltin("print", builtinPrint)
 	vm.registerBuiltin("len", builtinLen)
 	vm.registerBuiltin("type", builtinType)
-	vm.registerBuiltin("char_at", builtinCharAt)
-	vm.registerBuiltin("read_file", builtinReadFile)
-	vm.registerBuiltin("write_file", builtinWriteFile)
 	return vm
 }
 
