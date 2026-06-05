@@ -53,6 +53,7 @@ func NewVM() *VM {
 	vm.registerBuiltin("print", builtinPrint)
 	vm.registerBuiltin("len", builtinLen)
 	vm.registerBuiltin("type", builtinType)
+	vm.registerBrowserBuiltins()
 	return vm
 }
 
